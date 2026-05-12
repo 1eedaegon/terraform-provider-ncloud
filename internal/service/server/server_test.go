@@ -153,6 +153,64 @@ func TestAccResourceNcloudServer_vpc_networkInterface(t *testing.T) {
 	})
 }
 
+// TestAccResourceNcloudServer_vpc_baseBlockStorageSize covers the full
+// base_block_storage_size lifecycle on KVM in a single test: schema floor,
+// create-time mapping, KVM detection, in-place expand, and shrink rejection.
+// Tracks upstream issue #518.
+func TestAccResourceNcloudServer_vpc_baseBlockStorageSize(t *testing.T) {
+	name := GetTestServerName()
+	resourceName := "ncloud_server.server"
+	specCode := "s2-g3"
+
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { TestAccPreCheck(t) },
+		ProtoV6ProviderFactories: ProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckServerDestroy,
+		Steps: []resource.TestStep{
+			{ // schema floor: below 50GB rejected at plan
+				Config:      testAccServerKvmBaseVolumeConfig(name, specCode, 40),
+				ExpectError: regexp.MustCompile(`base_block_storage_size.*at least`),
+			},
+			{ // create with explicit 50GB via BlockStorageMappingList
+				Config: testAccServerKvmBaseVolumeConfig(name, specCode, 50),
+				Check: resource.ComposeTestCheckFunc(
+					resource.TestCheckResourceAttr(resourceName, "hypervisor_type", "KVM"),
+					resource.TestCheckResourceAttr(resourceName, "base_block_storage_size", "50"),
+				),
+			},
+			{ // in-place expand
+				Config: testAccServerKvmBaseVolumeConfig(name, specCode, 100),
+				Check:  resource.TestCheckResourceAttr(resourceName, "base_block_storage_size", "100"),
+			},
+			{ // shrink rejected at plan
+				Config:      testAccServerKvmBaseVolumeConfig(name, specCode, 50),
+				ExpectError: regexp.MustCompile("only expandable"),
+			},
+		},
+	})
+}
+
+// TestAccResourceNcloudServer_vpc_baseBlockStorageSize_xenRejected verifies the
+// CustomizeDiff guard: base_block_storage_size combined with
+// server_image_product_code (XEN) must fail at plan, never reaching apply.
+func TestAccResourceNcloudServer_vpc_baseBlockStorageSize_xenRejected(t *testing.T) {
+	resource.Test(t, resource.TestCase{
+		PreCheck:                 func() { TestAccPreCheck(t) },
+		ProtoV6ProviderFactories: ProtoV6ProviderFactories,
+		CheckDestroy:             testAccCheckServerDestroy,
+		Steps: []resource.TestStep{
+			{
+				Config: testAccServerXenWithBaseVolumeConfig(
+					GetTestServerName(),
+					"SVR.VSVR.STAND.C002.M008.NET.HDD.B050.G002",
+					100,
+				),
+				ExpectError: regexp.MustCompile(`base_block_storage_size.*requires KVM`),
+			},
+		},
+	})
+}
+
 func TestAccResourceNcloudServer_vpc_changeSpec(t *testing.T) {
 	var before serverservice.ServerInstance
 	var after serverservice.ServerInstance
@@ -344,6 +402,81 @@ resource "ncloud_server" "server" {
 `, testServerName, specCode)
 }
 
+func testAccServerKvmBaseVolumeConfig(testServerName, specCode string, baseSizeGB int) string {
+	return fmt.Sprintf(`
+resource "ncloud_login_key" "loginkey" {
+	key_name = "%[1]s-key"
+}
+
+resource "ncloud_vpc" "test" {
+	name               = "%[1]s"
+	ipv4_cidr_block    = "10.5.0.0/16"
+}
+
+resource "ncloud_subnet" "test" {
+	vpc_no             = ncloud_vpc.test.vpc_no
+	name               = "%[1]s"
+	subnet             = "10.5.0.0/24"
+	zone               = "KR-2"
+	network_acl_no     = ncloud_vpc.test.default_network_acl_no
+	subnet_type        = "PUBLIC"
+	usage_type         = "GEN"
+}
+
+data "ncloud_server_image_numbers" "kvm_images" {
+    filter {
+        name   = "name"
+        values = ["rocky-8.10-base"]
+    }
+    filter {
+        name   = "hypervisor_type"
+        values = ["KVM"]
+    }
+}
+
+resource "ncloud_server" "server" {
+	subnet_no               = ncloud_subnet.test.id
+	name                    = "%[1]s"
+	server_image_number     = data.ncloud_server_image_numbers.kvm_images.image_number_list.0.server_image_number
+	server_spec_code        = "%[2]s"
+	login_key_name          = ncloud_login_key.loginkey.key_name
+	base_block_storage_size = %[3]d
+}
+`, testServerName, specCode, baseSizeGB)
+}
+
+func testAccServerXenWithBaseVolumeConfig(testServerName, productCode string, baseSizeGB int) string {
+	return fmt.Sprintf(`
+resource "ncloud_login_key" "loginkey" {
+	key_name = "%[1]s-key"
+}
+
+resource "ncloud_vpc" "test" {
+	name               = "%[1]s"
+	ipv4_cidr_block    = "10.5.0.0/16"
+}
+
+resource "ncloud_subnet" "test" {
+	vpc_no             = ncloud_vpc.test.vpc_no
+	name               = "%[1]s"
+	subnet             = "10.5.0.0/24"
+	zone               = "KR-2"
+	network_acl_no     = ncloud_vpc.test.default_network_acl_no
+	subnet_type        = "PUBLIC"
+	usage_type         = "GEN"
+}
+
+resource "ncloud_server" "server" {
+	subnet_no                 = ncloud_subnet.test.id
+	name                      = "%[1]s"
+	server_image_product_code = "SW.VSVR.OS.LNX64.ROCKY.0810.B050"
+	server_product_code       = "%[2]s"
+	login_key_name            = ncloud_login_key.loginkey.key_name
+	base_block_storage_size   = %[3]d
+}
+`, testServerName, productCode, baseSizeGB)
+}
+
 func testAccServerVpcConfig(testServerName, productCode string) string {
 	return fmt.Sprintf(`
 resource "ncloud_login_key" "loginkey" {
@@ -428,7 +561,7 @@ resource "ncloud_server" "server" {
 		order = 0
 		network_interface_no = ncloud_network_interface.eth0.id
 	}
-	
+
 	network_interface {
 		order = 1
 		network_interface_no = ncloud_network_interface.eth1.id
