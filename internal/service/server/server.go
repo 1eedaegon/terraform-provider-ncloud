@@ -684,27 +684,47 @@ func userSetString(d *schema.ResourceDiff, name string) bool {
 	return v.AsString() != ""
 }
 
-// updateBaseBlockStorageSize resizes the base (root) volume of an existing
-// KVM server via ChangeBlockStorageInstance. NCloud requires the server to be
-// stopped for base-volume resize, so we stop → resize → wait → start. The
-// shrink and hypervisor invariants have already been enforced at plan time by
-// CustomizeDiff and createServerInstance respectively.
-func updateBaseBlockStorageSize(d *schema.ResourceData, config *conn.ProviderConfig) error {
-	bsList, err := getVpcBasicBlockStorageList(config, d.Id())
-	if err != nil {
-		return err
+func selectBaseBlockStorage(list []*BlockStorage) *BlockStorage {
+	for _, bs := range list {
+		if bs == nil || bs.BlockStorageType == nil {
+			continue
+		}
+		if *bs.BlockStorageType == "SVRBS" {
+			continue
+		}
+		return bs
 	}
-	if len(bsList) == 0 || bsList[0].BlockStorageInstanceNo == nil {
-		return fmt.Errorf("no base block storage found for server %s", d.Id())
-	}
-	baseVolumeNo := *bsList[0].BlockStorageInstanceNo
-	newSizeGB := d.Get("base_block_storage_size").(int)
+	return nil
+}
 
+// updateBaseBlockStorageSize resizes the root volume of an existing KVM server
+// via ChangeBlockStorageInstance using a stop → mutate → start flow,
+// with shrink validation enforced at plan time
+// and live hypervisor checks ensuring safe standalone updates.
+func updateBaseBlockStorageSize(d *schema.ResourceData, config *conn.ProviderConfig) error {
 	instance, err := GetServerInstance(config, d.Id())
 	if err != nil {
 		return err
 	}
-	if instance != nil && ncloud.StringValue(instance.ServerInstanceStatus) != "NSTOP" {
+	if instance == nil {
+		return fmt.Errorf("server %s not found for base_block_storage_size resize", d.Id())
+	}
+	if hyp := ncloud.StringValue(instance.HypervisorType); hyp != "KVM" {
+		return fmt.Errorf("base_block_storage_size resize requires KVM hypervisor (server %s is %s)", d.Id(), hyp)
+	}
+
+	bsList, err := getVpcBasicBlockStorageList(config, d.Id())
+	if err != nil {
+		return err
+	}
+	base := selectBaseBlockStorage(bsList)
+	if base == nil || base.BlockStorageInstanceNo == nil {
+		return fmt.Errorf("no base block storage found for server %s", d.Id())
+	}
+	baseVolumeNo := *base.BlockStorageInstanceNo
+	newSizeGB := d.Get("base_block_storage_size").(int)
+
+	if ncloud.StringValue(instance.ServerInstanceStatus) != "NSTOP" {
 		log.Printf("[INFO] Stopping server %s for base_block_storage_size resize", d.Id())
 		if err := stopThenWaitServerInstance(config, d.Id()); err != nil {
 			return err
@@ -733,19 +753,21 @@ func updateBaseBlockStorageSize(d *schema.ResourceData, config *conn.ProviderCon
 }
 
 // buildBaseBlockStorageInfo populates the actual base volume size from NCloud
-// (vserver.ServerInstance omits it). Order=0 is treated as the base volume,
-// matching how createServerInstance constructs BlockStorageMappingList. The
-// SDK returns size in bytes; we convert to GB to match the schema's unit.
-// Called conditionally from Read so users not using this feature pay no cost.
+// (vserver.ServerInstance omits it). The block storage list may contain
+// multiple attached volumes with no guaranteed ordering, so the base volume
+// is selected explicitly via selectBaseBlockStorage. The SDK returns size in
+// bytes; we convert to GB to match the schema's unit. Called conditionally
+// from Read so users not using this feature pay no cost.
 func buildBaseBlockStorageInfo(config *conn.ProviderConfig, r *ServerInstance) error {
 	bsList, err := getVpcBasicBlockStorageList(config, *r.ServerInstanceNo)
 	if err != nil {
 		return err
 	}
-	if len(bsList) == 0 || bsList[0].BlockStorageSize == nil {
+	base := selectBaseBlockStorage(bsList)
+	if base == nil || base.BlockStorageSize == nil {
 		return nil
 	}
-	sizeGB := *bsList[0].BlockStorageSize / int64(common.GIGABYTE)
+	sizeGB := *base.BlockStorageSize / int64(common.GIGABYTE)
 	r.BaseBlockStorageSize = &sizeGB
 	return nil
 }
