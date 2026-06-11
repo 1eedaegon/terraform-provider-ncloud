@@ -1,0 +1,34 @@
+# Fork release: build and publish provider binaries to GitHub Releases on tag push.
+# Downstream CI/CD consumes the assets via a Terraform/OpenTofu filesystem mirror
+# (gh release download -> unzip into the plugins dir), so no GPG signing or registry
+# account is needed. Upstream's signed/registry flow lives in go.yml and is gated to
+# the upstream repo, so only one release workflow runs per repository.
+name: release (fork)
+on:
+  push:
+    tags:
+      - 'v*'
+permissions:
+  contents: write
+jobs:
+  goreleaser:
+    # Forks only — upstream uses the signed registry release in go.yml.
+    if: github.repository != 'NaverCloudPlatform/terraform-provider-ncloud'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v1"
+          args: release --clean --config .goreleaser.fork.yml
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

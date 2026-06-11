@@ -1,0 +1,46 @@
+# Fork release config for internal binary distribution (not the Terraform Registry).
+# Differences from .goreleaser.yml (the upstream, registry-oriented config):
+#   - No GPG `signs` block: filesystem/network mirrors verify checksums, not signatures,
+#     so forks can release without a signing key / secrets.
+#   - `release.draft: false`: assets are published immediately so `gh release download`
+#     in downstream CI/CD works without a manual publish step.
+#   - darwin/arm is ignored: Go only supports darwin/amd64 and darwin/arm64, so leaving
+#     darwin/arm in the matrix fails the whole build.
+# Consumed via a Terraform/OpenTofu filesystem mirror; see README/PR for the layout.
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - env:
+      - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - '-s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X {{ replace .GitURL "https://" "" }}/ncloud.version={{ .Version }}'
+    goos:
+      - freebsd
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - "386"
+      - arm
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: "386"
+      - goos: darwin
+        goarch: arm
+    binary: "{{ .ProjectName }}_v{{ .Version }}"
+archives:
+  - format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+checksum:
+  name_template: "{{ .ProjectName }}_{{ .Version }}_SHA256SUMS"
+  algorithm: sha256
+release:
+  draft: false
+changelog:
+  skip: true

@@ -16,6 +16,8 @@ on:
       - 'v*'
 jobs:
   goreleaser:
+    # Upstream only — forks publish unsigned binaries via release.yml.
+    if: github.repository == 'NaverCloudPlatform/terraform-provider-ncloud'
     runs-on: ubuntu-latest
     steps:
       -
